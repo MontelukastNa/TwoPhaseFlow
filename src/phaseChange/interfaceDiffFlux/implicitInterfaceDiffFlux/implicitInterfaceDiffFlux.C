@@ -144,6 +144,11 @@ Foam::tmp<Foam::volScalarField> Foam::implicitInterfaceDiffFlux::diffusiveFlux
     DynamicField<vector> neiDistValues(100); // avoid resizing
     DynamicField<label> neiIndicies(100); // avoid resizing
 
+    // Fixed support used by the anchored normal-linear reconstruction.
+    const scalar supportFactor = 3.0;
+    const scalar meshLength = 1.0/gAverage(mesh_.nonOrthDeltaCoeffs());
+    const scalar supportRadius = supportFactor*meshLength;
+
     forAll(markedCells,celli)
     {
         if (markedCells[celli] && mag(normal[celli]) != 0)
@@ -175,21 +180,57 @@ Foam::tmp<Foam::volScalarField> Foam::implicitInterfaceDiffFlux::diffusiveFlux
                 neiIndicies
             );
 
-            forAll(neiPhiValues,i)
+            if (!otherSide)
             {
-                scalar phiNeiValue = neiPhiValues[i];
-                vector dist = neiDistValues[i];
-                scalar deltaPhi = phiNeiValue-bcValue;
-                scalar d = mag(dist & n);
-                scalar cosAngle = (dist/mag(dist)) & n;
-                scalar weight = pow(mag(cosAngle),4);
-                avgdPhidN += deltaPhi/d*weight;
-                avgWeight += weight;
-            }
+                // Anchored normal-linear WLS:
+                // T-TGamma = a_n*xi_n, grad_n(T)|Gamma = a_n/R.
+                // The one-sided normal fade removes any per-sample 1/d_n
+                // singularity and continuously suppresses samples at Gamma.
+                scalar normalEquation = 0;
+                scalar normalRhs = 0;
+                forAll(neiPhiValues,i)
+                {
+                    const vector& dist = neiDistValues[i];
+                    const scalar dNormal = dist & n;
+                    const scalar radial = mag(dist)/supportRadius;
 
-            if (avgWeight != 0)
+                    if (dNormal > 0 && radial < 1)
+                    {
+                        const scalar xiNormal = dNormal/supportRadius;
+                        const scalar kernel =
+                            pow(1-radial,4)*(1+4*radial);
+                        const scalar weight = xiNormal*kernel;
+                        normalEquation += weight*sqr(xiNormal);
+                        normalRhs +=
+                            weight*xiNormal*(neiPhiValues[i]-bcValue);
+                    }
+                }
+
+                if (normalEquation > VSMALL)
+                {
+                    const scalar gradient =
+                        normalRhs/(normalEquation*supportRadius);
+                    diffusiveFlux[celli] = gradient*gamma[celli];
+                }
+            }
+            else
             {
-                diffusiveFlux[celli] = avgdPhidN/avgWeight*gamma[celli];
+                // Preserve the gas-side reconstruction unchanged.
+                forAll(neiPhiValues,i)
+                {
+                    const scalar deltaPhi = neiPhiValues[i]-bcValue;
+                    const vector& dist = neiDistValues[i];
+                    const scalar d = mag(dist & n);
+                    const scalar cosAngle = (dist/mag(dist)) & n;
+                    const scalar weight = pow(mag(cosAngle),4);
+                    avgdPhidN += deltaPhi/d*weight;
+                    avgWeight += weight;
+                }
+                if (avgWeight != 0)
+                {
+                    diffusiveFlux[celli] =
+                        avgdPhidN/avgWeight*gamma[celli];
+                }
             }
 
         }
